@@ -4,10 +4,12 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, future::join_all, stream::SplitSink};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 #[derive(Error, Debug)]
 pub enum RoomError {
+    #[error("player '{0}' already exists")]
+    PlayerAlreadyExists(Arc<str>),
     #[error("player '{0}' not found in room")]
     PlayerNotFound(Arc<str>),
     #[error("player '{0}' already connected")]
@@ -42,93 +44,111 @@ impl Room {
         }
     }
 
-    pub fn handle_message(&mut self, name: Arc<str>, message: PlayerMessage) {
+    pub async fn handle_message(&mut self, name: Arc<str>, message: PlayerMessage) {
         match message {
-            PlayerMessage::Chat { text } => self.send(ServerMessage::Chat { name, text }),
+            PlayerMessage::Chat { text } => self.send_all(ServerMessage::Chat { name, text }).await,
             PlayerMessage::Start => {
                 if name == self.host && self.game_state.is_none() {
                     self.game_state = Some(GameState::Bidding);
                 }
             }
+        };
+    }
+
+    pub async fn connect(
+        &mut self,
+        name: Arc<str>,
+    ) -> Result<Receiver<Arc<ServerMessage>>, RoomError> {
+        let channel_handle = &mut self
+            .players
+            .get_mut(&name)
+            .ok_or(RoomError::PlayerNotFound(name.clone()))?
+            .channel_handle;
+
+        if channel_handle.is_some() {
+            Err(RoomError::PlayerAlreadyConnected(name))
+        } else {
+            let (sender, receiver) = mpsc::channel::<Arc<ServerMessage>>(1);
+            channel_handle.insert(sender);
+
+            self.send_all(ServerMessage::Connect { name }).await;
+            Ok(receiver)
         }
     }
 
-    pub fn handle_join(&mut self, name: Arc<str>) -> Result<(), RoomError> {
-        let player = self
-            .players
+    pub async fn disconnect(&mut self, name: Arc<str>) -> Result<(), RoomError> {
+        self.players
             .get_mut(&name)
-            .ok_or(RoomError::PlayerNotFound(name.clone()))?;
-
-        player
-            .is_connected
-            .then(|| player.is_connected = false)
-            .ok_or(RoomError::PlayerAlreadyConnected(name.clone()))?;
-
-        self.send(ServerMessage::Join { name });
-        Ok(())
-    }
-
-    pub fn handle_leave(&mut self, name: Arc<str>) -> Result<(), RoomError> {
-        let player = self
-            .players
-            .get_mut(&name)
-            .ok_or(RoomError::PlayerNotFound(name.clone()))?;
-
-        player
-            .is_connected
-            .then(|| player.is_connected = false)
+            .ok_or(RoomError::PlayerNotFound(name.clone()))?
+            .channel_handle
+            .take()
             .ok_or(RoomError::PlayerAlreadyDisconnected(name.clone()))?;
 
-        self.send(ServerMessage::Leave { name });
+        self.send_all(ServerMessage::Disconnect { name }).await;
         Ok(())
     }
 
-    pub fn subscribe(&self) -> Receiver<ServerMessage> {
-        self.channel_handle.subscribe()
+    pub fn join(&mut self, name: Arc<str>) -> Result<(), RoomError> {
+        if self.players.contains_key(&name) {
+            Err(RoomError::PlayerAlreadyExists(name))
+        } else {
+            self.players.insert(name.clone(), Player::default());
+
+            self.send_all(ServerMessage::Join { name });
+            Ok(())
+        }
     }
 
-    fn send(&self, message: ServerMessage) {
-        // this "fails" if all receiver handles have been dropped. we don't care how many receiver
-        // handles there are left, because we want to keep the game open even if everyone has
-        // disconnected
-        let _ = self.channel_handle.send(message);
+    pub fn leave(&mut self, name: Arc<str>) -> Result<(), RoomError> {
+        self.players
+            .remove(&name)
+            .ok_or(RoomError::PlayerNotFound(name.clone()))?;
+
+        self.send_all(ServerMessage::Leave { name });
+        Ok(())
     }
 
     async fn send_one(
         &mut self,
         recipient: Arc<str>,
-        message: ServerMessage,
+        message: Arc<ServerMessage>,
     ) -> Result<(), RoomError> {
-        Ok(self
+        let _ = self
             .players
             .get_mut(&recipient)
             .ok_or(RoomError::PlayerNotFound(recipient.clone()))?
-            .socket_sink
+            .channel_handle
             .as_mut()
             .ok_or(RoomError::PlayerAlreadyDisconnected(recipient))?
-            .send(message.to_socket_message())
-            .await
-            .unwrap())
+            .send(message)
+            .await;
+        Ok(())
     }
 
-    async fn send_all(&mut self, message: ServerMessage) -> Result<(), RoomError> {
-        join_all(self.players.values_mut().filter_map(|player| {
-            Some(
-                player
-                    .socket_sink
-                    .as_mut()?
-                    .send(message.to_socket_message()),
-            )
-        }))
+    async fn send_all(&mut self, message: ServerMessage) {
+        let message = Arc::new(message);
+        join_all(
+            self.players
+                .values_mut()
+                .filter_map(|player| Some(player.channel_handle.as_mut()?.send(message.clone()))),
+        )
         .await;
-        Ok(())
     }
 }
 
 #[derive(Debug)]
 struct Player {
     points: i32,
-    socket_sink: Option<SplitSink<WebSocket, Message>>,
+    channel_handle: Option<Sender<Arc<ServerMessage>>>,
+}
+
+impl Default for Player {
+    fn default() -> Self {
+        Player {
+            points: 0,
+            channel_handle: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -149,10 +169,4 @@ pub enum ServerMessage {
     Connect { name: Arc<str> },
     Disconnect { name: Arc<str> },
     Chat { name: Arc<str>, text: Arc<str> },
-}
-
-impl ServerMessage {
-    fn to_socket_message(&self) -> Message {
-        Message::text(serde_json::to_string(self).expect("failed to parse server message"))
-    }
 }

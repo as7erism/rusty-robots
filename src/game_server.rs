@@ -15,9 +15,10 @@ use thiserror::Error;
 use tokio::sync::{
     Mutex,
     broadcast::{Receiver, Sender},
+    mpsc,
 };
 
-use crate::game::{PlayerMessage, Room};
+use crate::game::{PlayerMessage, Room, ServerMessage};
 
 pub fn init_game_server() -> Router {
     let rooms = HashMap::<Arc<str>, Arc<Mutex<Room>>>::new();
@@ -42,10 +43,15 @@ async fn websocket_handler(
 
 async fn websocket(socket: WebSocket, room: Arc<Mutex<Room>>, name: Arc<str>) {
     let (mut socket_sender, mut socket_receiver) = socket.split();
-    let mut channel_receiver = room.lock().await.subscribe();
+    let mut channel_receiver = room
+        .lock()
+        .await
+        .connect(name.clone())
+        .await
+        .expect("player not found");
 
     let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = channel_receiver.recv().await {
+        while let Some(msg) = channel_receiver.recv().await {
             if socket_sender
                 .send(Message::text(
                     serde_json::to_string(&msg).expect("parsing message failed"),
@@ -65,16 +71,18 @@ async fn websocket(socket: WebSocket, room: Arc<Mutex<Room>>, name: Arc<str>) {
             let message = serde_json::from_str::<PlayerMessage>(json.as_str())
                 .expect("parsing player message failed");
 
-            room2.lock().await.handle_message(name2.clone(), message);
+            room2
+                .lock()
+                .await
+                .handle_message(name2.clone(), message)
+                .await;
         }
     });
-
-    room.lock().await.handle_join(name.clone()).unwrap();
 
     tokio::select! {
         _ = &mut send_task => receive_task.abort(),
         _ = &mut receive_task => send_task.abort(),
     };
 
-    room.lock().await.handle_leave(name).unwrap();
+    room.lock().await.disconnect(name).await.unwrap();
 }

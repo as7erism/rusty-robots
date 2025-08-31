@@ -1,13 +1,10 @@
-use axum::{
-    Router, extract::Request, handler::HandlerWithoutStateExt, http::StatusCode, routing::get,
-};
+use api::api;
+use axum::Router;
 use std::net::SocketAddr;
-use tower::ServiceExt;
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+mod api;
 
 #[tokio::main]
 async fn main() {
@@ -20,7 +17,9 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let app = Router::new().fallback_service(ServeDir::new("client/build"));
+    let app = Router::new()
+        .fallback_service(ServeDir::new("client/build"))
+        .nest("/api", api());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

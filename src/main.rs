@@ -1,10 +1,11 @@
-use api::api;
 use axum::Router;
+use game_server::init_game_server;
 use std::net::SocketAddr;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod api;
+mod game;
+mod game_server;
 
 #[tokio::main]
 async fn main() {
@@ -19,7 +20,7 @@ async fn main() {
 
     let app = Router::new()
         .fallback_service(ServeDir::new("client/build"))
-        .nest("/api", api());
+        .nest("/api", init_game_server());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

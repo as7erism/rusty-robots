@@ -1,7 +1,7 @@
 # rusty robots
 
 backend server implementation of [ricochet robots](https://en.wikipedia.org/wiki/Ricochet_Robots)
-written in rust bundled with a svelte frontend
+written in rust bundled with a svelte frontend. in (very) early stages of development.
 
 ## development
 

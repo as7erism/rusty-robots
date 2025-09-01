@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8.4", features = ["json", "ws"] }
-axum-extra = { version = "0.10.1", features = ["cookie"] }
 base64 = "0.22.1"
 bimap = "0.6.3"
 futures-util = "0.3.31"
@@ -18,3 +17,7 @@ tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.6.1", features = ["fs", "trace"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[features]
+default = ["client"]
+client = []

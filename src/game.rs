@@ -10,7 +10,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 
 const TOKEN_LEN: usize = 16;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, Serialize)]
 pub enum RoomError {
     #[error("game already started")]
     GameStarted,
@@ -22,6 +22,8 @@ pub enum RoomError {
     PlayerConnected(Arc<str>),
     #[error("player '{0}' already disconnected")]
     PlayerDisconnected(Arc<str>),
+    #[error("incorrect password")]
+    IncorrectPassword,
 }
 
 #[derive(Debug)]
@@ -129,11 +131,17 @@ impl Room {
         self.tokens.get(token.as_ref()).cloned()
     }
 
-    pub async fn join(&mut self, name: Arc<str>) -> Result<[u8; TOKEN_LEN], RoomError> {
+    pub async fn join(
+        &mut self,
+        name: Arc<str>,
+        password: Option<Arc<str>>,
+    ) -> Result<[u8; TOKEN_LEN], RoomError> {
         if self.phase.is_some() {
             Err(RoomError::GameStarted)
         } else if self.players.contains_key(&name) {
             Err(RoomError::PlayerExists(name))
+        } else if self.password != password {
+            Err(RoomError::IncorrectPassword)
         } else {
             self.players.insert(name.clone(), Player::default());
 

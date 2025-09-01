@@ -18,9 +18,13 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let app = Router::new()
-        .fallback_service(ServeDir::new("client/build"))
-        .nest("/api", init_game_server());
+    let app = if cfg!(feature = "client") {
+        Router::new()
+            .fallback_service(ServeDir::new("client/build"))
+            .nest("/api", init_game_server())
+    } else {
+        init_game_server()
+    };
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

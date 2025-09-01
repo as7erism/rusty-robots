@@ -50,9 +50,9 @@ impl IntoResponse for ServerError {
         (
             match self {
                 Self::RoomNotFound => StatusCode::NOT_FOUND,
-                Self::MissingName
-                | Self::InvalidName
-                | Self::InvalidPassword => StatusCode::BAD_REQUEST,
+                Self::MissingName | Self::InvalidName | Self::InvalidPassword => {
+                    StatusCode::BAD_REQUEST
+                }
                 Self::MissingToken => StatusCode::UNAUTHORIZED,
                 Self::InvalidToken => StatusCode::FORBIDDEN,
                 Self::RoomError(ref err) => match err {
@@ -72,8 +72,7 @@ pub fn init_game_server() -> Router {
     Router::new()
         .route("/rooms", get(|| async {}))
         .route("/rooms/create", post(handle_create))
-        .route("/rooms/{code}", post(handle_join))
-        .route("/rooms/{code}/ws", get(websocket_handler))
+        .route("/rooms/{code}", post(handle_join).get(websocket_handler))
         .with_state(Arc::new(Mutex::new(rooms)))
 }
 
@@ -201,7 +200,7 @@ async fn websocket_handler(
                         .map_err(|_| ServerError::InvalidToken)?
                         .to_string()
                         .strip_prefix("Bearer ")
-                        .ok_or(ServerError::InvalidToken)?
+                        .ok_or(ServerError::InvalidToken)?,
                 )
                 .map_err(|_| ServerError::InvalidToken)?,
         )

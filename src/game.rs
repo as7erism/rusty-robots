@@ -70,7 +70,8 @@ impl Room {
     pub async fn handle_message(&mut self, username: Arc<str>, message: PlayerMessage) {
         match message {
             PlayerMessage::Chat { text } => {
-                self.send_all(Arc::new(ServerMessage::Chat { username, text })).await
+                self.send_all(Arc::new(ServerMessage::Chat { username, text }))
+                    .await
             }
             PlayerMessage::Start => unimplemented!(),
         };
@@ -112,7 +113,8 @@ impl Room {
                     }),
                 )
                 .await;
-            self.send_all(Arc::new(ServerMessage::Connect { username })).await;
+            self.send_all(Arc::new(ServerMessage::Connect { username }))
+                .await;
             Ok(receiver)
         }
     }
@@ -127,7 +129,8 @@ impl Room {
             .take()
             .ok_or(RoomError::PlayerDisconnected(username.clone()))?;
 
-        self.send_all(Arc::new(ServerMessage::Disconnect { username })).await;
+        self.send_all(Arc::new(ServerMessage::Disconnect { username }))
+            .await;
         Ok(())
     }
 
@@ -196,7 +199,7 @@ impl Room {
         join_all(
             self.players
                 .values_mut()
-                .filter_map(|player| Some(player.channel_handle.as_mut()?.send(message.clone())))
+                .filter_map(|player| Some(player.channel_handle.as_mut()?.send(message.clone()))),
         )
         .await;
     }

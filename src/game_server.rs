@@ -17,7 +17,10 @@ use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::game::{PlayerMessage, Room, RoomError};
+use room::{PlayerMessage, Room, RoomError};
+
+mod room;
+mod websocket;
 
 const NUM_CODE_CHARS: usize = 36;
 const CODE_CHARS: [char; NUM_CODE_CHARS] = [

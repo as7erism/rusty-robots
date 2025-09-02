@@ -7,7 +7,6 @@ use tower_http::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod game;
 mod game_server;
 
 #[tokio::main]

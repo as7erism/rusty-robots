@@ -34,6 +34,7 @@ pub struct Room {
     players: HashMap<Arc<str>, Player>,
     host: Arc<str>,
     phase: Option<Phase>,
+    websocket_channel: Sender<(Arc<str>, PlayerMessage)>,
 }
 
 fn generate_token() -> [u8; TOKEN_LEN] {
@@ -54,6 +55,10 @@ impl Room {
 
         room.players.insert(host.clone(), Player::default());
         let token = room.create_token(host);
+
+        tokio::spawn(|| async {
+            
+        })
 
         (room, token)
     }

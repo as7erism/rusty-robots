@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use axum_extra::extract::CookieJar;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{SinkExt, stream::StreamExt};
 use rand::{Rng, rng};
@@ -31,10 +32,10 @@ type ServerState = Arc<Mutex<HashMap<Arc<str>, Arc<Mutex<Room>>>>>;
 enum ServerError {
     #[error("room not found")]
     RoomNotFound,
-    #[error("name missing")]
-    MissingName,
-    #[error("name invalid")]
-    InvalidName,
+    #[error("username missing")]
+    MissingUsername,
+    #[error("username invalid")]
+    InvalidUsername,
     #[error("password invalid")]
     InvalidPassword,
     #[error("token missing")]
@@ -50,7 +51,7 @@ impl IntoResponse for ServerError {
         (
             match self {
                 Self::RoomNotFound => StatusCode::NOT_FOUND,
-                Self::MissingName | Self::InvalidName | Self::InvalidPassword => {
+                Self::MissingUsername | Self::InvalidUsername | Self::InvalidPassword => {
                     StatusCode::BAD_REQUEST
                 }
                 Self::MissingToken => StatusCode::UNAUTHORIZED,
@@ -72,14 +73,30 @@ pub fn init_game_server() -> Router {
     Router::new()
         .route("/rooms", get(|| async {}))
         .route("/rooms/create", post(handle_create))
-        .route("/rooms/{code}", post(handle_join).get(websocket_handler))
+        .route("/rooms/{code}", get(|| async {}))
+        .route("/rooms/{code}/join", post(handle_join))
+        .route("/rooms/{code}/ws", get(websocket_handler))
         .with_state(Arc::new(Mutex::new(rooms)))
+}
+
+// TODO sanitize strings
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CreateRequest {
+    username: Arc<str>,
+    password: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CreateResponse {
     code: Arc<str>,
     token: Arc<str>,
+}
+
+// TODO sanitize strings
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinRequest {
+    username: Arc<str>,
+    password: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,9 +115,9 @@ fn generate_code() -> Arc<str> {
 }
 
 async fn handle_join(
-    headers: HeaderMap,
     Path(code): Path<String>,
     State(rooms): State<ServerState>,
+    Json(payload): Json<JoinRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
     let room = rooms
         .lock()
@@ -112,23 +129,7 @@ async fn handle_join(
     let token = room
         .lock()
         .await
-        .join(
-            headers
-                .get("RR-Name")
-                .ok_or(ServerError::MissingName)?
-                .to_str()
-                .map_err(|_| ServerError::InvalidName)?
-                .into(),
-            match headers.get("RR-Password") {
-                Some(password) => Some(
-                    password
-                        .to_str()
-                        .map_err(|_| ServerError::InvalidPassword)?
-                        .into(),
-                ),
-                None => None,
-            },
-        )
+        .join(payload.username, payload.password)
         .await?;
 
     Ok(Json(JoinResponse {
@@ -137,31 +138,15 @@ async fn handle_join(
 }
 
 async fn handle_create(
-    headers: HeaderMap,
     State(rooms): State<ServerState>,
+    Json(payload): Json<CreateRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
     let mut code = generate_code();
     while rooms.lock().await.contains_key(&code) {
         code = generate_code();
     }
 
-    let (room, host_token) = Room::create(
-        headers
-            .get("RR-Name")
-            .ok_or(ServerError::MissingName)?
-            .to_str()
-            .map_err(|_| ServerError::InvalidName)?
-            .into(),
-        match headers.get("RR-Password") {
-            Some(password) => Some(
-                password
-                    .to_str()
-                    .map_err(|_| ServerError::InvalidPassword)?
-                    .into(),
-            ),
-            None => None,
-        },
-    );
+    let (room, host_token) = Room::create(payload.username, payload.password);
 
     rooms
         .lock()
@@ -177,6 +162,7 @@ async fn handle_create(
 async fn websocket_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
+    cookies: CookieJar,
     Path(code): Path<String>,
     State(rooms): State<ServerState>,
 ) -> Result<impl IntoResponse, ServerError> {
@@ -187,36 +173,50 @@ async fn websocket_handler(
         .ok_or(ServerError::RoomNotFound)?
         .clone();
 
-    let name = room
+    tracing::debug!("got room");
+
+    let token = STANDARD
+        .decode(if let Some(auth_header) = headers.get("Authorization") {
+            auth_header
+                .to_str()
+                .map_err(|_| ServerError::InvalidToken)?
+                .strip_prefix("Bearer ")
+                .ok_or(ServerError::InvalidToken)?
+        } else {
+            tracing::debug!("trying to get cookie");
+            let cookie = cookies
+                .get("token")
+                .ok_or(ServerError::MissingToken)?
+                .value();
+            tracing::debug!("got cookie: {cookie}");
+            cookie
+        })
+        .map_err(|_| ServerError::InvalidToken)?;
+
+    tracing::debug!("got token");
+
+    let username = room
         .lock()
         .await
-        .authenticate(
-            STANDARD
-                .decode(
-                    headers
-                        .get("Authorization")
-                        .ok_or(ServerError::MissingToken)?
-                        .to_str()
-                        .map_err(|_| ServerError::InvalidToken)?
-                        .to_string()
-                        .strip_prefix("Bearer ")
-                        .ok_or(ServerError::InvalidToken)?,
-                )
-                .map_err(|_| ServerError::InvalidToken)?,
-        )
+        .authenticate(token)
         .ok_or(ServerError::InvalidToken)?;
 
-    Ok(ws.on_upgrade(|socket| websocket(socket, room, name)))
+    tracing::debug!("got name: {username}");
+
+    Ok(ws.on_upgrade(|socket| websocket(socket, room, username)))
 }
 
-async fn websocket(socket: WebSocket, room: Arc<Mutex<Room>>, name: Arc<str>) {
+async fn websocket(socket: WebSocket, room: Arc<Mutex<Room>>, username: Arc<str>) {
+    tracing::debug!("handling websocket");
     let (mut socket_sender, mut socket_receiver) = socket.split();
     let mut channel_receiver = room
         .lock()
         .await
-        .connect(name.clone())
+        .connect(username.clone())
         .await
         .expect("player not found");
+
+    tracing::debug!("connected to room");
 
     let mut send_task = tokio::spawn(async move {
         while let Some(msg) = channel_receiver.recv().await {
@@ -232,10 +232,13 @@ async fn websocket(socket: WebSocket, room: Arc<Mutex<Room>>, name: Arc<str>) {
         }
     });
 
-    let name2 = name.clone();
+    tracing::debug!("spawned send task");
+
+    let name2 = username.clone();
     let room2 = room.clone();
     let mut receive_task = tokio::spawn(async move {
         while let Some(Ok(Message::Text(json))) = socket_receiver.next().await {
+            tracing::info!("got message {} from {}", json.as_str(), name2);
             let message = serde_json::from_str::<PlayerMessage>(json.as_str())
                 .expect("parsing player message failed");
 
@@ -247,10 +250,12 @@ async fn websocket(socket: WebSocket, room: Arc<Mutex<Room>>, name: Arc<str>) {
         }
     });
 
+    tracing::debug!("spawned receive task");
+
     tokio::select! {
         _ = &mut send_task => receive_task.abort(),
         _ = &mut receive_task => send_task.abort(),
     };
 
-    room.lock().await.disconnect(name).await.unwrap();
+    room.lock().await.disconnect(username).await.unwrap();
 }

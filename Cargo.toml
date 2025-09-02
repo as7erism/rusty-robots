@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8.4", features = ["json", "ws"] }
+axum-extra = { version = "0.10.1", features = ["cookie"] }
 base64 = "0.22.1"
 bimap = "0.6.3"
 futures-util = "0.3.31"

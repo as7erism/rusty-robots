@@ -9,6 +9,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 const TOKEN_LEN: usize = 16;
+const CHANNEL_CAPACITY: usize = 10;
 
 #[derive(Error, Debug, Clone, Serialize)]
 pub enum RoomError {
@@ -57,48 +58,52 @@ impl Room {
         (room, token)
     }
 
-    fn create_token(&mut self, name: Arc<str>) -> [u8; TOKEN_LEN] {
+    fn create_token(&mut self, username: Arc<str>) -> [u8; TOKEN_LEN] {
         let mut token = generate_token();
         while self.tokens.contains_key(&token) {
             token = generate_token();
         }
-        self.tokens.insert(token, name);
+        self.tokens.insert(token, username);
         token
     }
 
-    pub async fn handle_message(&mut self, name: Arc<str>, message: PlayerMessage) {
+    pub async fn handle_message(&mut self, username: Arc<str>, message: PlayerMessage) {
         match message {
-            PlayerMessage::Chat { text } => self.send_all(ServerMessage::Chat { name, text }).await,
+            PlayerMessage::Chat { text } => {
+                self.send_all(Arc::new(ServerMessage::Chat { username, text })).await
+            }
             PlayerMessage::Start => unimplemented!(),
         };
     }
 
     pub async fn connect(
         &mut self,
-        name: Arc<str>,
+        username: Arc<str>,
     ) -> Result<Receiver<Arc<ServerMessage>>, RoomError> {
+        tracing::info!("player {username} connecting");
         let channel_handle = &mut self
             .players
-            .get_mut(&name)
-            .ok_or(RoomError::PlayerNotFound(name.clone()))?
+            .get_mut(&username)
+            .ok_or(RoomError::PlayerNotFound(username.clone()))?
             .channel_handle;
 
         if channel_handle.is_some() {
-            Err(RoomError::PlayerConnected(name))
+            tracing::warn!("player {username} tried to connect while connected");
+            Err(RoomError::PlayerConnected(username))
         } else {
-            let (sender, receiver) = mpsc::channel::<Arc<ServerMessage>>(1);
+            let (sender, receiver) = mpsc::channel::<Arc<ServerMessage>>(CHANNEL_CAPACITY);
             *channel_handle = Some(sender);
 
             let _ = self
                 .send_one(
-                    name.clone(),
+                    username.clone(),
                     Arc::new(ServerMessage::Welcome {
-                        name: name.clone(),
+                        username: username.clone(),
                         players: self
                             .players
                             .iter()
                             .map(|(n, p)| PlayerDescriptor {
-                                name: n.clone(),
+                                username: n.clone(),
                                 points: p.points,
                             })
                             .collect(),
@@ -107,20 +112,22 @@ impl Room {
                     }),
                 )
                 .await;
-            self.send_all(ServerMessage::Connect { name }).await;
+            self.send_all(Arc::new(ServerMessage::Connect { username })).await;
             Ok(receiver)
         }
     }
 
-    pub async fn disconnect(&mut self, name: Arc<str>) -> Result<(), RoomError> {
+    pub async fn disconnect(&mut self, username: Arc<str>) -> Result<(), RoomError> {
+        tracing::info!("player {username} disconnecting");
+
         self.players
-            .get_mut(&name)
-            .ok_or(RoomError::PlayerNotFound(name.clone()))?
+            .get_mut(&username)
+            .ok_or(RoomError::PlayerNotFound(username.clone()))?
             .channel_handle
             .take()
-            .ok_or(RoomError::PlayerDisconnected(name.clone()))?;
+            .ok_or(RoomError::PlayerDisconnected(username.clone()))?;
 
-        self.send_all(ServerMessage::Disconnect { name }).await;
+        self.send_all(Arc::new(ServerMessage::Disconnect { username })).await;
         Ok(())
     }
 
@@ -133,34 +140,36 @@ impl Room {
 
     pub async fn join(
         &mut self,
-        name: Arc<str>,
+        username: Arc<str>,
         password: Option<Arc<str>>,
     ) -> Result<[u8; TOKEN_LEN], RoomError> {
         if self.phase.is_some() {
             Err(RoomError::GameStarted)
-        } else if self.players.contains_key(&name) {
-            Err(RoomError::PlayerExists(name))
+        } else if self.players.contains_key(&username) {
+            Err(RoomError::PlayerExists(username))
         } else if self.password != password {
             Err(RoomError::IncorrectPassword)
         } else {
-            self.players.insert(name.clone(), Player::default());
+            self.players.insert(username.clone(), Player::default());
 
-            self.send_all(ServerMessage::Join { name: name.clone() })
-                .await;
-            Ok(self.create_token(name))
+            self.send_all(Arc::new(ServerMessage::Join {
+                username: username.clone(),
+            }))
+            .await;
+            Ok(self.create_token(username))
         }
     }
 
-    pub async fn leave(&mut self, name: Arc<str>) -> Result<(), RoomError> {
+    pub async fn leave(&mut self, username: Arc<str>) -> Result<(), RoomError> {
         todo!();
 
         //self.players
-        //    .remove(&name)
-        //    .ok_or(RoomError::PlayerNotFound(name.clone()))?;
+        //    .remove(&username)
+        //    .ok_or(RoomError::PlayerNotFound(username.clone()))?;
         //
-        //self.tokens.remove_by_right(&name);
+        //self.tokens.remove_by_right(&username);
         //
-        //self.send_all(ServerMessage::Leave { name }).await;
+        //self.send_all(ServerMessage::Leave { username }).await;
         //Ok(())
     }
 
@@ -169,24 +178,25 @@ impl Room {
         recipient: Arc<str>,
         message: Arc<ServerMessage>,
     ) -> Result<(), RoomError> {
+        tracing::info!("sending message {message:?} to {recipient}");
         let _ = self
             .players
             .get_mut(&recipient)
             .ok_or(RoomError::PlayerNotFound(recipient.clone()))?
             .channel_handle
             .as_mut()
-            .ok_or(RoomError::PlayerDisconnected(recipient))?
-            .send(message)
+            .ok_or(RoomError::PlayerDisconnected(recipient.clone()))?
+            .send(message.clone())
             .await;
         Ok(())
     }
 
-    async fn send_all(&mut self, message: ServerMessage) {
-        let message = Arc::new(message);
+    async fn send_all(&mut self, message: Arc<ServerMessage>) {
+        tracing::info!("sending message {message:?} to all");
         join_all(
             self.players
                 .values_mut()
-                .filter_map(|player| Some(player.channel_handle.as_mut()?.send(message.clone()))),
+                .filter_map(|player| Some(player.channel_handle.as_mut()?.send(message.clone())))
         )
         .await;
     }
@@ -199,8 +209,8 @@ struct Player {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct PlayerDescriptor {
-    name: Arc<str>,
+pub struct PlayerDescriptor {
+    username: Arc<str>,
     points: i32,
 }
 
@@ -227,25 +237,25 @@ pub enum PlayerMessage {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ServerMessage {
     Join {
-        name: Arc<str>,
+        username: Arc<str>,
     },
     Leave {
-        name: Arc<str>,
+        username: Arc<str>,
     },
     Connect {
-        name: Arc<str>,
+        username: Arc<str>,
     },
     Disconnect {
-        name: Arc<str>,
+        username: Arc<str>,
     },
     Welcome {
-        name: Arc<str>,
+        username: Arc<str>,
         players: Vec<PlayerDescriptor>,
         host: Arc<str>,
         phase: Option<Phase>,
     },
     Chat {
-        name: Arc<str>,
+        username: Arc<str>,
         text: Arc<str>,
     },
 }

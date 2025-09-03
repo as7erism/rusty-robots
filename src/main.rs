@@ -1,43 +1,41 @@
-use axum::Router;
+use actix_files::{Files, NamedFile};
+use actix_web::{App, HttpServer, Scope};
 use game_server::init_game_server;
-use std::net::SocketAddr;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
+use tracing_actix_web::TracingLogger;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod game_server;
 
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                format!("{}=debug,tower_http=debug", env!("CARGO_CRATE_NAME")).into()
-            }),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    let app = if cfg!(feature = "client") {
-        Router::new()
-            .fallback_service(
-                ServeDir::new("client/build").fallback(ServeFile::new("client/build/dynamic.html")),
-            )
-            .nest("/api", init_game_server())
-    } else {
-        init_game_server()
-    };
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3003));
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    tracing::debug!("listening on http://{}", listener.local_addr().unwrap());
-    axum::serve(listener, app.layer(TraceLayer::new_for_http()))
-        .with_graceful_shutdown((|| async {
-            tokio::signal::ctrl_c().await.unwrap();
-            println!("handling ctrlc");
-        })())
-        .await
-        .unwrap();
+#[actix::main]
+async fn main() -> std::io::Result<()> {
+    //tracing_subscriber::registry()
+    //    .with(
+    //        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+    //            format!("{}=debug,tower_http=debug", env!("CARGO_CRATE_NAME")).into()
+    //        }),
+    //    )
+    //    .with(tracing_subscriber::fmt::layer())
+    //    .init();
+    //
+    HttpServer::new(move || {
+        let app = App::new().wrap(TracingLogger::default());
+        if cfg!(feature = "client") {
+            app
+                .service(Scope::new("/api").configure(init_game_server))
+                .service(Files::new("/", "client/build").index_file("index.html"))
+                .default_service(
+                    NamedFile::open("client/build/dynamic.html")
+                        .expect("couldn't open fallback file; was the frontend built?"),
+                )
+        } else {
+            app.configure(init_game_server)
+        }
+    })
+    .bind(("127.0.0.1", 3003))?
+    .run()
+    .await
 }

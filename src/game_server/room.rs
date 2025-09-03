@@ -56,11 +56,7 @@ impl Room {
         room.players.insert(host.clone(), Player::default());
         let token = room.create_token(host);
 
-        tokio::spawn(|| async {
-            
-        })
-
-        (room, token)
+        tokio::spawn(|| async {})(room, token)
     }
 
     fn create_token(&mut self, username: Arc<str>) -> [u8; TOKEN_LEN] {

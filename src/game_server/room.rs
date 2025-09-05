@@ -2,25 +2,27 @@ use std::{collections::HashMap, sync::Arc};
 
 use actix::{Actor, Context, Handler, Message, Recipient};
 use rand::{rng, RngCore};
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{Sender, Receiver, channel};
 
 const TOKEN_LEN: usize = 16;
 const CHANNEL_CAPACITY: usize = 10;
 
-//#[derive(Error, Debug, Clone, Serialize)]
-//pub enum RoomError {
-//    #[error("game already started")]
-//    GameStarted,
-//    #[error("player '{0}' already exists")]
-//    PlayerExists(Arc<str>),
-//    #[error("player '{0}' not found in room")]
-//    PlayerNotFound(Arc<str>),
-//    #[error("player '{0}' already connected")]
-//    PlayerConnected(Arc<str>),
-//    #[error("player '{0}' already disconnected")]
-//    PlayerDisconnected(Arc<str>),
-//    #[error("incorrect password")]
-//    IncorrectPassword,
-//}
+#[derive(Debug, Clone)]
+pub enum RoomError {
+    //#[error("game already started")]
+    //GameStarted,
+    //#[error("player '{0}' already exists")]
+    //PlayerExists(Arc<str>),
+    //#[error("player '{0}' not found in room")]
+    //PlayerNotFound(Arc<str>),
+    //#[error("player '{0}' already connected")]
+    //PlayerConnected(Arc<str>),
+    //#[error("player '{0}' already disconnected")]
+    //PlayerDisconnected(Arc<str>),
+    //#[error("incorrect password")]
+    //IncorrectPassword,
+}
 //
 //#[derive(Debug)]
 //pub struct Room {
@@ -200,19 +202,19 @@ fn generate_token() -> [u8; TOKEN_LEN] {
 //        .await;
 //    }
 //}
-//
-//#[derive(Debug)]
-//struct Player {
-//    points: i32,
-//    channel_handle: Option<Sender<Arc<ServerMessage>>>,
-//}
-//
-//#[derive(Serialize, Deserialize, Debug, Clone)]
-//pub struct PlayerDescriptor {
-//    username: Arc<str>,
-//    points: i32,
-//}
-//
+
+#[derive(Debug)]
+struct Player {
+    points: i32,
+    channel_handle: Option<Sender<ServerMessage>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PlayerDescriptor {
+    username: Arc<str>,
+    points: i32,
+}
+
 //impl Default for Player {
 //    fn default() -> Self {
 //        Player {
@@ -221,54 +223,54 @@ fn generate_token() -> [u8; TOKEN_LEN] {
 //        }
 //    }
 //}
-//
-//#[derive(Serialize, Deserialize, Debug, Clone)]
-//pub enum Phase {
-//    Bidding,
-//}
-//
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Phase {
+    Bidding,
+}
+
 //#[derive(Serialize, Deserialize, Debug, Clone)]
 //pub enum PlayerMessage {
 //    Chat { text: Arc<str> },
 //    Start,
 //}
 //
-//#[derive(Serialize, Deserialize, Debug, Clone)]
-//pub enum ServerMessage {
-//    Join {
-//        username: Arc<str>,
-//    },
-//    Leave {
-//        username: Arc<str>,
-//    },
-//    Connect {
-//        username: Arc<str>,
-//    },
-//    Disconnect {
-//        username: Arc<str>,
-//    },
-//    Welcome {
-//        username: Arc<str>,
-//        players: Vec<PlayerDescriptor>,
-//        host: Arc<str>,
-//        phase: Option<Phase>,
-//    },
-//    Chat {
-//        username: Arc<str>,
-//        text: Arc<str>,
-//    },
-//}
-//
-#[derive(Debug, Message)]
-#[rtype(result = "()")]
-enum ServerMessage {
-    Chat { username: Arc<str>, text: Arc<str> },
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ServerMessage {
+    Join {
+        username: Arc<str>,
+    },
+    Leave {
+        username: Arc<str>,
+    },
+    Connect {
+        username: Arc<str>,
+    },
+    Disconnect {
+        username: Arc<str>,
+    },
+    Welcome {
+        username: Arc<str>,
+        players: Vec<PlayerDescriptor>,
+        host: Arc<str>,
+        phase: Option<Phase>,
+    },
+    Chat {
+        username: Arc<str>,
+        text: Arc<str>,
+    },
 }
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
 enum PlayerMessage {
     Chat { text: Arc<str> },
+}
+
+#[derive(Debug, Message)]
+#[rtype(result = "Result<Sender<ServerMessage>, RoomError>")]
+struct Connect {
+    username: Arc<str>,
 }
 
 impl PlayerMessage {
@@ -294,7 +296,7 @@ enum GamePhase {}
 pub struct Room {
     tokens: HashMap<[u8; TOKEN_LEN], Arc<str>>,
     password: Option<Arc<str>>,
-    players: HashMap<Arc<str>, Recipient<ServerMessage>>,
+    players: HashMap<Arc<str>, Player>,
     host: Arc<str>,
     rounds: u32,
     phase: Option<GamePhase>,
@@ -311,7 +313,7 @@ impl Room {
             phase: None,
         };
 
-        room.players.insert(host.clone(), );
+        //room.players.insert(host.clone(), );
         let token = room.create_token(host);
     }
 
@@ -324,11 +326,12 @@ impl Room {
         token
     }
 
-    fn send_one(&self, message: ServerMessage) {
+    fn send_one(&self, username: Arc<str>, message: ServerMessage) {
         todo!();
     }
 
     fn send_all(&self, message: ServerMessage) {
+        // TODO rayon it up
         todo!();
     }
 }
@@ -346,6 +349,49 @@ impl Handler<SignedPlayerMessage> for Room {
                 username: msg.username,
                 text,
             }),
+        }
+    }
+}
+
+impl Handler<Connect> for Room {
+    type Result = Result<Receiver<ServerMessage>, RoomError>;
+
+    fn handle(&mut self, msg: Connect, ctx: &mut Self::Context) -> Self::Result {
+        tracing::info!("player {username} connecting");
+        let channel_handle = &mut self
+            .players
+            .get_mut(&msg.username)
+            // TODO
+            .unwrap()
+            .channel_handle;
+
+        if channel_handle.is_some() {
+            tracing::warn!("player {username} tried to connect while connected");
+            todo!();
+            //Err(RoomError::PlayerConnected(username))
+        } else {
+            let (sender, receiver) = channel::<Arc<ServerMessage>>(CHANNEL_CAPACITY);
+            *channel_handle = Some(sender);
+
+            let _ = self
+                .send_one(
+                    msg.username.clone(),
+                    ServerMessage::Welcome {
+                        username: msg.username.clone(),
+                        players: self
+                            .players
+                            .iter()
+                            .map(|(n, p)| PlayerDescriptor {
+                                username: n.clone(),
+                                points: p.points,
+                            })
+                            .collect(),
+                        host: self.host.clone(),
+                        phase: self.phase.clone(),
+                    },
+                );
+            self.send_all(Arc::new(ServerMessage::Connect { username }));
+            Ok(receiver)
         }
     }
 }

@@ -1,6 +1,7 @@
-use actix_web::{HttpResponse, Scope, web};
+use actix_web::{error, http::StatusCode, web::{self, Json}, HttpResponse, Scope};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::{Rng, rng};
+use room::Room;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
@@ -8,7 +9,7 @@ use tokio::sync::Mutex;
 
 //use room::{PlayerMessage, Room, RoomError};
 
-//mod room;
+mod room;
 //mod websocket;
 
 const NUM_CODE_CHARS: usize = 36;
@@ -20,48 +21,47 @@ const CODE_LEN: usize = 4;
 
 //type ServerState = Arc<Mutex<HashMap<Arc<str>, Arc<Mutex<Room>>>>>;
 //
-//#[derive(Error, Debug, Serialize, Clone)]
-//enum ServerError {
-//    #[error("room not found")]
-//    RoomNotFound,
-//    #[error("username missing")]
-//    MissingUsername,
-//    #[error("username invalid")]
-//    InvalidUsername,
-//    #[error("password invalid")]
-//    InvalidPassword,
-//    #[error("token missing")]
-//    MissingToken,
-//    #[error("token invalid")]
-//    InvalidToken,
-//    #[error("room error: {0}")]
-//    RoomError(#[from] RoomError),
-//}
+#[derive(Error, Debug, Serialize, Clone)]
+enum ServerError {
+    #[error("room not found")]
+    RoomNotFound,
+    #[error("username missing")]
+    MissingUsername,
+    #[error("username invalid")]
+    InvalidUsername,
+    #[error("password invalid")]
+    InvalidPassword,
+    #[error("token missing")]
+    MissingToken,
+    #[error("token invalid")]
+    InvalidToken,
+    //#[error("room error: {0}")]
+    //RoomError(#[from] RoomError),
+}
 
-//impl IntoResponse for ServerError {
-//    fn into_response(self) -> Response {
-//        (
-//            match self {
-//                Self::RoomNotFound => StatusCode::NOT_FOUND,
-//                Self::MissingUsername | Self::InvalidUsername | Self::InvalidPassword => {
-//                    StatusCode::BAD_REQUEST
-//                }
-//                Self::MissingToken => StatusCode::UNAUTHORIZED,
-//                Self::InvalidToken => StatusCode::FORBIDDEN,
-//                Self::RoomError(ref err) => match err {
-//                    RoomError::GameStarted => StatusCode::CONFLICT,
-//                    _ => todo!(),
-//                },
-//            },
-//            self,
-//        )
-//            .into_response()
-//    }
-//}
+// TODO finish override
+impl error::ResponseError for ServerError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        match self {
+            Self::RoomNotFound => StatusCode::NOT_FOUND,
+            Self::MissingUsername | Self::InvalidUsername | Self::InvalidPassword => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::MissingToken => StatusCode::UNAUTHORIZED,
+            Self::InvalidToken => StatusCode::FORBIDDEN,
+            //Self::RoomError(ref err) => match err {
+            //    RoomError::GameStarted => StatusCode::CONFLICT,
+            //    _ => todo!(),
+            //},
+        }
+    }
+}
 
 pub fn init_game_server(cfg: &mut web::ServiceConfig) {
     cfg.route("/rooms", web::get().to(|| HttpResponse::Ok()))
-        .route("/rooms/create", web::post().to(|| HttpResponse::Ok()));
+        .route("/rooms/create", web::post().to(|| HttpResponse::Ok()))
+        .route("/rooms/{code}/join", web::post().to(|| HttpResponse::Ok()))
+        .route("/rooms/{code}/ws", web::get().to(|| HttpResponse::Ok()));
 }
 
 //pub fn init_game_server(cfg: &mut web::ServiceConfig) {
@@ -77,40 +77,40 @@ pub fn init_game_server(cfg: &mut web::ServiceConfig) {
 //}
 
 // TODO sanitize strings
-//#[derive(Clone, Debug, Serialize, Deserialize)]
-//struct CreateRequest {
-//    username: Arc<str>,
-//    password: Option<Arc<str>>,
-//}
-//
-//#[derive(Clone, Debug, Serialize, Deserialize)]
-//struct CreateResponse {
-//    code: Arc<str>,
-//    token: Arc<str>,
-//}
-//
-//// TODO sanitize strings
-//#[derive(Clone, Debug, Serialize, Deserialize)]
-//struct JoinRequest {
-//    username: Arc<str>,
-//    password: Option<Arc<str>>,
-//}
-//
-//#[derive(Clone, Debug, Serialize, Deserialize)]
-//struct JoinResponse {
-//    token: Arc<str>,
-//}
-//
-//fn generate_code() -> Arc<str> {
-//    let mut code = String::with_capacity(CODE_LEN);
-//
-//    for _ in 0..CODE_LEN {
-//        code.push(CODE_CHARS[rng().random_range(..NUM_CODE_CHARS)]);
-//    }
-//
-//    code.into()
-//}
-//
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CreateRequest {
+    username: Arc<str>,
+    password: Option<Arc<str>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CreateResponse {
+    code: Arc<str>,
+    token: Arc<str>,
+}
+
+// TODO sanitize strings
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinRequest {
+    username: Arc<str>,
+    password: Option<Arc<str>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinResponse {
+    token: Arc<str>,
+}
+
+fn generate_code() -> Arc<str> {
+    let mut code = String::with_capacity(CODE_LEN);
+
+    for _ in 0..CODE_LEN {
+        code.push(CODE_CHARS[rng().random_range(..NUM_CODE_CHARS)]);
+    }
+
+    code.into()
+}
+
 //async fn handle_join(
 //    Path(code): Path<String>,
 //    State(rooms): State<ServerState>,
@@ -133,28 +133,30 @@ pub fn init_game_server(cfg: &mut web::ServiceConfig) {
 //        token: STANDARD.encode(token).into(),
 //    }))
 //}
-//
-//async fn handle_create(
-//    State(rooms): State<ServerState>,
-//    Json(payload): Json<CreateRequest>,
-//) -> Result<impl IntoResponse, ServerError> {
-//    let mut code = generate_code();
-//    while rooms.lock().await.contains_key(&code) {
-//        code = generate_code();
-//    }
-//
-//    let (room, host_token) = Room::create(payload.username, payload.password);
-//
-//    rooms
-//        .lock()
-//        .await
-//        .insert(code.clone(), Arc::new(Mutex::new(room)));
-//
-//    Ok(Json(CreateResponse {
-//        code,
-//        token: STANDARD.encode(host_token).into(),
-//    }))
-//}
+
+type Rooms = Mutex<HashMap<Arc<str>, Room>>;
+
+async fn handle_create(
+    rooms: web::Data<Rooms>,
+    body: Json<CreateRequest>,
+) -> Result<web::Json<CreateResponse>, ServerError> {
+    let mut code = generate_code();
+    while rooms.lock().await.contains_key(&code) {
+        code = generate_code();
+    }
+
+    let (room, host_token) = Room::create(payload.username, payload.password);
+
+    rooms
+        .lock()
+        .await
+        .insert(code.clone(), Arc::new(Mutex::new(room)));
+
+    Ok(Json(CreateResponse {
+        code,
+        token: STANDARD.encode(host_token).into(),
+    }))
+}
 //
 //async fn websocket_handler(
 //    ws: WebSocketUpgrade,

@@ -1,4 +1,8 @@
-use actix_web::{error, http::StatusCode, web::{self, Json}, HttpResponse, Scope};
+use actix_web::{
+    HttpResponse, Scope, error,
+    http::StatusCode,
+    web::{self, Json},
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::{Rng, rng};
 use room::Room;

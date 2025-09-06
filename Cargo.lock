@@ -1249,6 +1249,7 @@ dependencies = [
  "actix-web",
  "base64",
  "bimap",
+ "derive_more",
  "futures-util",
  "rand",
  "serde",

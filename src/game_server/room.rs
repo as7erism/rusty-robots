@@ -1,27 +1,29 @@
 use std::{collections::HashMap, sync::Arc};
 
 use actix::{Actor, Context, Handler, Message, Recipient};
-use rand::{rng, RngCore};
+use rand::{RngCore, rng};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{Sender, Receiver, channel};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 const TOKEN_LEN: usize = 16;
 const CHANNEL_CAPACITY: usize = 10;
 
+pub type Token = [u8; TOKEN_LEN];
+
 #[derive(Debug, Clone)]
 pub enum RoomError {
-    //#[error("game already started")]
-    //GameStarted,
-    //#[error("player '{0}' already exists")]
-    //PlayerExists(Arc<str>),
-    //#[error("player '{0}' not found in room")]
-    //PlayerNotFound(Arc<str>),
-    //#[error("player '{0}' already connected")]
-    //PlayerConnected(Arc<str>),
-    //#[error("player '{0}' already disconnected")]
-    //PlayerDisconnected(Arc<str>),
-    //#[error("incorrect password")]
-    //IncorrectPassword,
+    #[error("game already started")]
+    GameStarted,
+    #[error("player '{0}' already exists")]
+    PlayerExists(Arc<str>),
+    #[error("player '{0}' not found in room")]
+    PlayerNotFound(Arc<str>),
+    #[error("player '{0}' already connected")]
+    PlayerConnected(Arc<str>),
+    #[error("player '{0}' already disconnected")]
+    PlayerDisconnected(Arc<str>),
+    #[error("incorrect password")]
+    IncorrectPassword,
 }
 //
 //#[derive(Debug)]
@@ -34,7 +36,7 @@ pub enum RoomError {
 //    websocket_channel: Sender<(Arc<str>, PlayerMessage)>,
 //}
 
-fn generate_token() -> [u8; TOKEN_LEN] {
+fn generate_token() -> Token {
     let mut token = [0; TOKEN_LEN];
     rng().fill_bytes(&mut token);
     token
@@ -203,7 +205,7 @@ fn generate_token() -> [u8; TOKEN_LEN] {
 //    }
 //}
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Player {
     points: i32,
     channel_handle: Option<Sender<ServerMessage>>,
@@ -269,8 +271,9 @@ enum PlayerMessage {
 
 #[derive(Debug, Message)]
 #[rtype(result = "Result<Sender<ServerMessage>, RoomError>")]
-struct Connect {
+pub struct Connect {
     username: Arc<str>,
+    token: Token,
 }
 
 impl PlayerMessage {
@@ -358,6 +361,8 @@ impl Handler<Connect> for Room {
 
     fn handle(&mut self, msg: Connect, ctx: &mut Self::Context) -> Self::Result {
         tracing::info!("player {username} connecting");
+        // TODO authenticate via msg.token
+
         let channel_handle = &mut self
             .players
             .get_mut(&msg.username)
@@ -373,25 +378,76 @@ impl Handler<Connect> for Room {
             let (sender, receiver) = channel::<Arc<ServerMessage>>(CHANNEL_CAPACITY);
             *channel_handle = Some(sender);
 
-            let _ = self
-                .send_one(
-                    msg.username.clone(),
-                    ServerMessage::Welcome {
-                        username: msg.username.clone(),
-                        players: self
-                            .players
-                            .iter()
-                            .map(|(n, p)| PlayerDescriptor {
-                                username: n.clone(),
-                                points: p.points,
-                            })
-                            .collect(),
-                        host: self.host.clone(),
-                        phase: self.phase.clone(),
-                    },
-                );
+            let _ = self.send_one(
+                msg.username.clone(),
+                ServerMessage::Welcome {
+                    username: msg.username.clone(),
+                    players: self
+                        .players
+                        .iter()
+                        .map(|(n, p)| PlayerDescriptor {
+                            username: n.clone(),
+                            points: p.points,
+                        })
+                        .collect(),
+                    host: self.host.clone(),
+                    phase: self.phase.clone(),
+                },
+            );
             self.send_all(Arc::new(ServerMessage::Connect { username }));
             Ok(receiver)
+        }
+    }
+}
+
+#[derive(Debug, Message)]
+#[rtype(result = "Result<(), RoomError>")]
+pub struct Disconnect {
+    username: Arc<str>,
+}
+
+impl Handler<Disconnect> for Room {
+    type Result = Result<(), RoomError>;
+
+    fn handle(&mut self, msg: Disconnect, ctx: &mut Self::Context) -> Self::Result {
+        tracing::info!("player {username} disconnecting");
+
+        self.players
+            .get_mut(&msg.username)
+            .ok_or(RoomError::PlayerNotFound(msg.username.clone()))?
+            .channel_handle
+            .take()
+            .ok_or(RoomError::PlayerDisconnected(msg.username.clone()))?;
+
+        self.send_all(ServerMessage::Disconnect { username });
+        Ok(())
+    }
+}
+
+#[derive(Debug, Message)]
+#[rtype(result = "Result<Token, RoomError>")]
+pub struct Join {
+    username: Arc<str>,
+    password: Option<Arc<str>>,
+}
+
+impl Handler<Join> for Room {
+    type Result = Result<Token, RoomError>;
+
+    fn handle(&mut self, msg: Join, ctx: &mut Self::Context) -> Self::Result {
+        if self.phase.is_some() {
+            Err(RoomError::GameStarted)
+        } else if self.players.contains_key(&msg.username) {
+            Err(RoomError::PlayerExists(msg.username))
+        } else if self.password != msg.password {
+            Err(RoomError::IncorrectPassword)
+        } else {
+            self.players.insert(msg.username.clone(), Player::default());
+
+            self.send_all(ServerMessage::Join {
+                username: msg.username.clone(),
+            });
+            Ok(self.create_token(msg.username))
         }
     }
 }

@@ -1,7 +1,8 @@
+use actix::{Actor, Addr};
 use actix_web::{
     HttpResponse, Scope, error,
     http::StatusCode,
-    web::{self, Json},
+    web::{self, Data, Json},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::{Rng, rng};
@@ -10,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
+use validation::{Password, Username};
 
 //use room::{PlayerMessage, Room, RoomError};
 
 mod room;
+mod validation;
 //mod websocket;
 
 const NUM_CODE_CHARS: usize = 36;
@@ -23,18 +26,16 @@ const CODE_CHARS: [char; NUM_CODE_CHARS] = [
 ];
 const CODE_LEN: usize = 4;
 
-//type ServerState = Arc<Mutex<HashMap<Arc<str>, Arc<Mutex<Room>>>>>;
-//
 #[derive(Error, Debug, Serialize, Clone)]
 enum ServerError {
     #[error("room not found")]
     RoomNotFound,
     #[error("username missing")]
     MissingUsername,
-    #[error("username invalid")]
-    InvalidUsername,
-    #[error("password invalid")]
-    InvalidPassword,
+    #[error("username invalid: {0}")]
+    InvalidUsername(Arc<str>),
+    #[error("password invalid: {0}")]
+    InvalidPassword(Arc<str>),
     #[error("token missing")]
     MissingToken,
     #[error("token invalid")]
@@ -48,7 +49,7 @@ impl error::ResponseError for ServerError {
     fn status_code(&self) -> actix_web::http::StatusCode {
         match self {
             Self::RoomNotFound => StatusCode::NOT_FOUND,
-            Self::MissingUsername | Self::InvalidUsername | Self::InvalidPassword => {
+            Self::MissingUsername | Self::InvalidUsername(_) | Self::InvalidPassword(_) => {
                 StatusCode::BAD_REQUEST
             }
             Self::MissingToken => StatusCode::UNAUTHORIZED,
@@ -138,23 +139,28 @@ fn generate_code() -> Arc<str> {
 //    }))
 //}
 
-type Rooms = Mutex<HashMap<Arc<str>, Room>>;
+type Rooms = Mutex<HashMap<Arc<str>, Addr<Room>>>;
 
 async fn handle_create(
-    rooms: web::Data<Rooms>,
+    rooms: Data<Rooms>,
     body: Json<CreateRequest>,
-) -> Result<web::Json<CreateResponse>, ServerError> {
+) -> Result<Json<CreateResponse>, ServerError> {
     let mut code = generate_code();
     while rooms.lock().await.contains_key(&code) {
         code = generate_code();
     }
 
-    let (room, host_token) = Room::create(payload.username, payload.password);
+    let username =
+        Username::validate(body.username.clone()).map_err(|e| ServerError::InvalidUsername(e.0))?;
+    let password = if let Some(password) = &body.password {
+        Some(Password::validate(password.clone()).map_err(|e| ServerError::InvalidPassword(e.0))?)
+    } else {
+        None
+    };
+    let (room, host_token) = Room::create(username, password);
+    let room_addr = room.start();
 
-    rooms
-        .lock()
-        .await
-        .insert(code.clone(), Arc::new(Mutex::new(room)));
+    rooms.lock().await.insert(code.clone(), room_addr);
 
     Ok(Json(CreateResponse {
         code,
